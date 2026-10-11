@@ -1,0 +1,388 @@
+﻿
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Literal
+
+from fastapi import Depends, FastAPI, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from api.database import Base, engine, get_db
+from api import models
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
+
+
+app = FastAPI(
+    title="Multi-Agent Development Platform",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+
+# ---------- Project schemas ----------
+
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+
+
+class ProjectResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: str | None
+    status: str
+
+
+# ---------- Task schemas ----------
+
+class TaskCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+    assigned_agent: str | None = Field(default=None, max_length=100)
+    priority: int = Field(default=3, ge=1, le=5)
+    dependencies: list[int] = Field(default_factory=list)
+    approval_required: bool = False
+
+
+class TaskResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    title: str
+    description: str | None
+    assigned_agent: str | None
+    status: str
+    priority: int
+    dependencies: list[int]
+    result: str | None
+    error_message: str | None
+    approval_status: str
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+
+
+class TaskStatusUpdate(BaseModel):
+    status: Literal[
+        "pending",
+        "ready",
+        "running",
+        "blocked",
+        "awaiting_approval",
+        "completed",
+        "failed",
+        "cancelled",
+    ]
+    result: str | None = None
+    error_message: str | None = None
+
+class ApprovalCreate(BaseModel):
+    requested_action: str = Field(min_length=1, max_length=5000)
+
+
+class ApprovalDecision(BaseModel):
+    decision: Literal["approved", "rejected"]
+    reviewer_comment: str | None = Field(default=None, max_length=5000)
+
+
+class ApprovalResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    task_id: int
+    status: str
+    requested_action: str
+    reviewer_comment: str | None
+    created_at: datetime
+    resolved_at: datetime | None
+# ---------- Health ----------
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "multi-agent-dev-team",
+    }
+
+
+# ---------- Projects ----------
+
+@app.post("/projects", response_model=ProjectResponse, status_code=201)
+def create_project(
+    project_data: ProjectCreate,
+    db: Session = Depends(get_db),
+):
+    project = models.Project(
+        name=project_data.name,
+        description=project_data.description,
+    )
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@app.get("/projects", response_model=list[ProjectResponse])
+def list_projects(db: Session = Depends(get_db)):
+    statement = select(models.Project).order_by(models.Project.id)
+    return list(db.scalars(statement).all())
+
+
+# ---------- Tasks ----------
+
+@app.post(
+    "/projects/{project_id}/tasks",
+    response_model=TaskResponse,
+    status_code=201,
+)
+def create_task(
+    project_id: int,
+    task_data: TaskCreate,
+    db: Session = Depends(get_db),
+):
+    project = db.get(models.Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if len(set(task_data.dependencies)) != len(task_data.dependencies):
+        raise HTTPException(
+            status_code=422,
+            detail="Duplicate task dependencies are not allowed",
+        )
+
+    if any(dependency_id <= 0 for dependency_id in task_data.dependencies):
+        raise HTTPException(
+            status_code=422,
+            detail="Dependency IDs must be positive integers",
+        )
+
+    if any(dependency_id == task_data.dependencies for dependency_id in []):
+        # Kept empty intentionally; self-dependency is checked below.
+        pass
+
+    # A task cannot depend on itself; its ID is assigned after creation.
+    if task_data.dependencies:
+        dependencies = list(
+            db.scalars(
+                select(models.Task).where(
+                    models.Task.id.in_(task_data.dependencies),
+                    models.Task.project_id == project_id,
+                )
+            ).all()
+        )
+        found_ids = {task.id for task in dependencies}
+        missing_ids = set(task_data.dependencies) - found_ids
+        if missing_ids:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Dependencies must reference existing tasks in the "
+                    f"same project. Invalid IDs: {sorted(missing_ids)}"
+                ),
+            )
+
+    task = models.Task(
+        project_id=project_id,
+        title=task_data.title,
+        description=task_data.description,
+        assigned_agent=task_data.assigned_agent,
+        priority=task_data.priority,
+        dependencies=task_data.dependencies,
+        status="pending",
+        approval_status=(
+            "pending" if task_data.approval_required else "not_required"
+        ),
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+@app.get(
+    "/projects/{project_id}/tasks",
+    response_model=list[TaskResponse],
+)
+def list_project_tasks(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    if db.get(models.Project, project_id) is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    statement = (
+        select(models.Task)
+        .where(models.Task.project_id == project_id)
+        .order_by(models.Task.priority, models.Task.id)
+    )
+    return list(db.scalars(statement).all())
+
+
+@app.get("/tasks/{task_id}", response_model=TaskResponse)
+def get_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.get(models.Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+
+@app.patch("/tasks/{task_id}/status", response_model=TaskResponse)
+def update_task_status(
+    task_id: int,
+    update: TaskStatusUpdate,
+    db: Session = Depends(get_db),
+):
+    task = db.get(models.Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Do not let a task bypass an unresolved human approval.
+    if (
+        task.approval_status == "pending"
+        and update.status == "completed"
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="This task requires human approval before completion",
+        )
+
+    # Dependencies must be completed before this task can start running.
+    if update.status == "running" and task.dependencies:
+        dependency_tasks = list(
+            db.scalars(
+                select(models.Task).where(
+                    models.Task.id.in_(task.dependencies)
+                )
+            ).all()
+        )
+        if any(dependency.status != "completed" for dependency in dependency_tasks):
+            raise HTTPException(
+                status_code=409,
+                detail="Complete all task dependencies before starting this task",
+            )
+
+    now = datetime.now(timezone.utc)
+
+    if update.status == "running" and task.started_at is None:
+        task.started_at = now
+
+    if update.status in {"completed", "failed", "cancelled"}:
+        task.completed_at = now
+
+    if update.status == "awaiting_approval":
+        task.approval_status = "pending"
+
+    task.status = update.status
+
+    if update.result is not None:
+        task.result = update.result
+
+    if update.error_message is not None:
+        task.error_message = update.error_message
+
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+@app.post(
+    "/tasks/{task_id}/approvals",
+    response_model=ApprovalResponse,
+    status_code=201,
+)
+def request_approval(
+    task_id: int,
+    approval_data: ApprovalCreate,
+    db: Session = Depends(get_db),
+):
+    task = db.get(models.Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if task.status == "completed":
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot request approval for an already completed task",
+        )
+
+    approval = models.ApprovalRequest(
+        task_id=task_id,
+        requested_action=approval_data.requested_action,
+        status="pending",
+    )
+
+    task.approval_status = "pending"
+    task.status = "awaiting_approval"
+
+    db.add(approval)
+    db.commit()
+    db.refresh(approval)
+    return approval
+
+
+@app.get(
+    "/approvals/pending",
+    response_model=list[ApprovalResponse],
+)
+def list_pending_approvals(db: Session = Depends(get_db)):
+    statement = (
+        select(models.ApprovalRequest)
+        .where(models.ApprovalRequest.status == "pending")
+        .order_by(models.ApprovalRequest.id)
+    )
+    return list(db.scalars(statement).all())
+
+
+@app.post(
+    "/approvals/{approval_id}/decision",
+    response_model=ApprovalResponse,
+)
+def decide_approval(
+    approval_id: int,
+    decision_data: ApprovalDecision,
+    db: Session = Depends(get_db),
+):
+    approval = db.get(models.ApprovalRequest, approval_id)
+    if approval is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Approval request not found",
+        )
+
+    if approval.status != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail="This approval request has already been resolved",
+        )
+
+    task = db.get(models.Task, approval.task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Associated task not found",
+        )
+
+    now = datetime.now(timezone.utc)
+    approval.status = decision_data.decision
+    approval.reviewer_comment = decision_data.reviewer_comment
+    approval.resolved_at = now
+
+    if decision_data.decision == "approved":
+        task.approval_status = "approved"
+        task.status = "pending"
+    else:
+        task.approval_status = "rejected"
+        task.status = "blocked"
+
+    db.commit()
+    db.refresh(approval)
+    return approval
