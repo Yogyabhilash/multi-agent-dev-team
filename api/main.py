@@ -165,10 +165,6 @@ def create_task(
             detail="Dependency IDs must be positive integers",
         )
 
-    if any(dependency_id == task_data.dependencies for dependency_id in []):
-        # Kept empty intentionally; self-dependency is checked below.
-        pass
-
     # A task cannot depend on itself; its ID is assigned after creation.
     if task_data.dependencies:
         dependencies = list(
@@ -242,32 +238,55 @@ def update_task_status(
     db: Session = Depends(get_db),
 ):
     task = db.get(models.Task, task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="Task not found")
 
-    # Do not let a task bypass an unresolved human approval.
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Task not found",
+        )
+
+    # Do not allow execution while approval is pending or rejected.
     if (
-        task.approval_status == "pending"
-        and update.status == "completed"
+        update.status in {"running", "completed"}
+        and task.approval_status in {"pending", "rejected"}
     ):
         raise HTTPException(
             status_code=409,
-            detail="This task requires human approval before completion",
+            detail=(
+                "Human approval is pending or rejected. "
+                "Obtain approval before running or completing this task."
+            ),
         )
 
-    # Dependencies must be completed before this task can start running.
+    # A task can run only after all its dependencies are completed.
     if update.status == "running" and task.dependencies:
         dependency_tasks = list(
             db.scalars(
                 select(models.Task).where(
-                    models.Task.id.in_(task.dependencies)
+                    models.Task.id.in_(task.dependencies),
+                    models.Task.project_id == task.project_id,
                 )
             ).all()
         )
-        if any(dependency.status != "completed" for dependency in dependency_tasks):
+
+        completed_ids = {
+            dependency.id
+            for dependency in dependency_tasks
+            if dependency.status == "completed"
+        }
+
+        missing_or_incomplete = (
+            set(task.dependencies) - completed_ids
+        )
+
+        if missing_or_incomplete:
             raise HTTPException(
                 status_code=409,
-                detail="Complete all task dependencies before starting this task",
+                detail=(
+                    "Complete all task dependencies before starting. "
+                    f"Incomplete dependency IDs: "
+                    f"{sorted(missing_or_incomplete)}"
+                ),
             )
 
     now = datetime.now(timezone.utc)
@@ -291,6 +310,7 @@ def update_task_status(
 
     db.commit()
     db.refresh(task)
+
     return task
 
 
