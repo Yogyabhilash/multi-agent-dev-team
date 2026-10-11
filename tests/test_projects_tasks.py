@@ -72,3 +72,59 @@ def test_create_task_for_missing_project():
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Project not found"
+
+def test_task_cannot_run_without_approval():
+    project_response = client.post(
+        "/projects",
+        json={"name": "Approval Test Project"},
+    )
+    project_id = project_response.json()["id"]
+
+    task_response = client.post(
+        f"/projects/{project_id}/tasks",
+        json={
+            "title": "Task requiring approval",
+            "approval_required": True,
+        },
+    )
+    task_id = task_response.json()["id"]
+
+    response = client.patch(
+        f"/tasks/{task_id}/status",
+        json={"status": "running"},
+    )
+
+    assert response.status_code == 409
+    assert "Human approval is pending or rejected" in response.json()["detail"]
+
+
+def test_task_cannot_run_before_dependencies_complete():
+    project_response = client.post(
+        "/projects",
+        json={"name": "Dependency Test Project"},
+    )
+    project_id = project_response.json()["id"]
+
+    dependency_response = client.post(
+        f"/projects/{project_id}/tasks",
+        json={"title": "First task"},
+    )
+    dependency_id = dependency_response.json()["id"]
+
+    task_response = client.post(
+        f"/projects/{project_id}/tasks",
+        json={
+            "title": "Dependent task",
+            "dependencies": [dependency_id],
+        },
+    )
+    task_id = task_response.json()["id"]
+
+    response = client.patch(
+        f"/tasks/{task_id}/status",
+        json={"status": "running"},
+    )
+
+    assert response.status_code == 409
+    assert "Complete all task dependencies before starting" in response.json()["detail"]
+    assert str(dependency_id) in response.json()["detail"]
