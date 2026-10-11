@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from api.database import Base, engine, get_db
 from api import models
-
+from api.agents.planner import PlannerAgent
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -30,6 +30,11 @@ app = FastAPI(
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str | None = None
+
+
+class PlanRequest(BaseModel):
+    project_name: str = Field(min_length=1, max_length=200)
+    request: str = Field(min_length=1, max_length=10000)
 
 
 class ProjectResponse(BaseModel):
@@ -129,6 +134,91 @@ def create_project(
     db.commit()
     db.refresh(project)
     return project
+
+
+@app.post("/projects/plan", status_code=201)
+def create_project_plan(
+    plan_request: PlanRequest,
+    db: Session = Depends(get_db),
+):
+    planner = PlannerAgent()
+    plan = planner.create_plan(
+        plan_request.project_name,
+        plan_request.request,
+    )
+
+    project = models.Project(
+        name=plan.project_name,
+        description=plan.summary,
+    )
+    db.add(project)
+    db.flush()
+
+    created_tasks = []
+
+    try:
+        # First create tasks without dependencies.
+        for planned_task in plan.tasks:
+            task = models.Task(
+                project_id=project.id,
+                title=planned_task.title,
+                description=planned_task.description,
+                assigned_agent=planned_task.assigned_agent,
+                priority=planned_task.priority,
+                dependencies=[],
+                status="pending",
+                approval_status="pending",
+            )
+            db.add(task)
+            db.flush()
+            created_tasks.append(task)
+
+        # Map planner task numbers (1, 2, 3...) to actual database IDs.
+        for index, planned_task in enumerate(plan.tasks):
+            dependency_numbers = planned_task.dependencies
+
+            if any(
+                number < 1 or number > len(created_tasks)
+                for number in dependency_numbers
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Planner returned an invalid dependency number",
+                )
+
+            created_tasks[index].dependencies = [
+                created_tasks[number - 1].id
+                for number in dependency_numbers
+            ]
+
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
+
+    for task in created_tasks:
+        db.refresh(task)
+
+    return {
+        "project": {
+            "id": project.id,
+            "name": project.name,
+            "description": project.description,
+        },
+        "plan": plan.model_dump(),
+        "tasks": [
+            {
+                "id": task.id,
+                "title": task.title,
+                "assigned_agent": task.assigned_agent,
+                "dependencies": task.dependencies,
+                "status": task.status,
+                "approval_status": task.approval_status,
+            }
+            for task in created_tasks
+        ],
+    }
 
 
 @app.get("/projects", response_model=list[ProjectResponse])
