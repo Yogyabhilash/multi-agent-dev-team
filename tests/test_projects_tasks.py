@@ -128,3 +128,115 @@ def test_task_cannot_run_before_dependencies_complete():
     assert response.status_code == 409
     assert "Complete all task dependencies before starting" in response.json()["detail"]
     assert str(dependency_id) in response.json()["detail"]
+
+
+def test_list_ready_tasks_returns_eligible_tasks():
+    project_response = client.post(
+        "/projects",
+        json={"name": "Ready Tasks Test Project"},
+    )
+    assert project_response.status_code == 201
+    project_id = project_response.json()["id"]
+
+    task_response = client.post(
+        f"/projects/{project_id}/tasks",
+        json={
+            "title": "Ready task",
+            "assigned_agent": "developer",
+            "priority": 2,
+            "dependencies": [],
+            "approval_required": False,
+        },
+    )
+    assert task_response.status_code == 201
+
+    response = client.get(
+        f"/projects/{project_id}/tasks/ready"
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["project_id"] == project_id
+    assert data["ready_count"] == 1
+    assert data["tasks"][0]["title"] == "Ready task"
+    assert data["tasks"][0]["assigned_agent"] == "developer"
+    assert data["tasks"][0]["priority"] == 2
+
+
+def test_list_ready_tasks_excludes_tasks_awaiting_approval():
+    project_response = client.post(
+        "/projects",
+        json={"name": "Pending Approval Test Project"},
+    )
+    project_id = project_response.json()["id"]
+
+    task_response = client.post(
+        f"/projects/{project_id}/tasks",
+        json={
+            "title": "Task awaiting approval",
+            "approval_required": True,
+        },
+    )
+    assert task_response.status_code == 201
+
+    response = client.get(
+        f"/projects/{project_id}/tasks/ready"
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["ready_count"] == 0
+    assert data["tasks"] == []
+
+
+def test_list_ready_tasks_excludes_tasks_with_incomplete_dependencies():
+    project_response = client.post(
+        "/projects",
+        json={"name": "Incomplete Dependencies Test Project"},
+    )
+    project_id = project_response.json()["id"]
+
+    dependency_response = client.post(
+        f"/projects/{project_id}/tasks",
+        json={
+            "title": "First task",
+            "approval_required": False,
+        },
+    )
+    assert dependency_response.status_code == 201
+    dependency_id = dependency_response.json()["id"]
+
+    dependent_response = client.post(
+        f"/projects/{project_id}/tasks",
+        json={
+            "title": "Dependent task",
+            "dependencies": [dependency_id],
+            "approval_required": False,
+        },
+    )
+    assert dependent_response.status_code == 201
+
+    response = client.get(
+        f"/projects/{project_id}/tasks/ready"
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["ready_count"] == 1
+    assert data["tasks"][0]["title"] == "First task"
+    assert all(
+        task["title"] != "Dependent task"
+        for task in data["tasks"]
+    )
+
+
+def test_list_ready_tasks_for_missing_project():
+    response = client.get(
+        "/projects/999999999/tasks/ready"
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Project not found"

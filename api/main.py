@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from api.database import Base, engine, get_db
 from api import models
 from api.agents.planner import PlannerAgent
+from api.agents.orchestrator import AgentOrchestrator
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -312,6 +313,45 @@ def list_project_tasks(
     )
     return list(db.scalars(statement).all())
 
+@app.get("/projects/{project_id}/tasks/ready")
+def list_ready_tasks(
+    project_id: int,
+    db: Session = Depends(get_db),
+):
+    """Return tasks currently eligible for execution."""
+
+    project = db.get(models.Project, project_id)
+
+    if project is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Project not found",
+        )
+
+    statement = (
+        select(models.Task)
+        .where(models.Task.project_id == project_id)
+        .order_by(models.Task.id)
+    )
+
+    tasks = list(db.scalars(statement).all())
+
+    orchestrator = AgentOrchestrator()
+    ready_tasks = orchestrator.get_ready_tasks(tasks)
+
+    return {
+        "project_id": project_id,
+        "ready_count": len(ready_tasks),
+        "tasks": [
+            {
+                "task_id": task.task_id,
+                "title": task.title,
+                "assigned_agent": task.assigned_agent,
+                "priority": task.priority,
+            }
+            for task in ready_tasks
+        ],
+    }
 
 @app.get("/tasks/{task_id}", response_model=TaskResponse)
 def get_task(task_id: int, db: Session = Depends(get_db)):
