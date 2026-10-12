@@ -1,4 +1,4 @@
-
+import pytest
 from types import SimpleNamespace
 
 from api.agents.orchestrator import AgentOrchestrator
@@ -113,3 +113,114 @@ def test_scheduler_does_not_modify_original_tasks():
 
     assert tasks[0].status == original_status
     assert tasks[0].dependencies == original_dependencies
+
+
+from unittest.mock import Mock
+from types import SimpleNamespace
+
+from api.agents.agent_registry import AgentRegistry
+from api.agents.base_agent import AgentResult
+from api.agents.orchestrator import AgentOrchestrator
+
+
+def make_execution_task(**overrides):
+    task = {
+        "id": 1,
+        "title": "Create login page",
+        "description": "Build a basic login page.",
+        "assigned_agent": "developer",
+        "status": "pending",
+        "approval_status": "not_required",
+        "dependencies": [],
+        "priority": 2,
+    }
+    task.update(overrides)
+    return SimpleNamespace(**task)
+
+
+def test_execute_task_dispatches_to_registered_agent():
+    agent = Mock()
+    agent.execute.return_value = AgentResult(
+        success=True,
+        output="Generated login page code",
+    )
+
+    registry = AgentRegistry()
+    registry.register("developer", agent)
+    orchestrator = AgentOrchestrator(registry=registry)
+
+    task = make_execution_task()
+    result = orchestrator.execute_task(task)
+
+    assert result.success is True
+    assert result.output == "Generated login page code"
+    agent.execute.assert_called_once_with(
+        title="Create login page",
+        description="Build a basic login page.",
+    )
+
+
+def test_execute_task_rejects_non_pending_task():
+    agent = Mock()
+    registry = AgentRegistry()
+    registry.register("developer", agent)
+    orchestrator = AgentOrchestrator(registry=registry)
+
+    result = orchestrator.execute_task(
+        make_execution_task(status="completed")
+    )
+
+    assert result.success is False
+    assert result.error == "Only pending tasks can be executed."
+    agent.execute.assert_not_called()
+
+
+def test_execute_task_rejects_pending_approval():
+    agent = Mock()
+    registry = AgentRegistry()
+    registry.register("developer", agent)
+    orchestrator = AgentOrchestrator(registry=registry)
+
+    result = orchestrator.execute_task(
+        make_execution_task(approval_status="pending")
+    )
+
+    assert result.success is False
+    assert result.error == "Human approval is pending or rejected."
+    agent.execute.assert_not_called()
+
+
+def test_execute_task_rejects_unassigned_agent():
+    orchestrator = AgentOrchestrator(registry=AgentRegistry())
+
+    result = orchestrator.execute_task(
+        make_execution_task(assigned_agent=None)
+    )
+
+    assert result.success is False
+    assert result.error == "No agent is assigned to this task."
+
+
+def test_execute_task_rejects_unknown_agent():
+    orchestrator = AgentOrchestrator(registry=AgentRegistry())
+
+    result = orchestrator.execute_task(
+        make_execution_task(assigned_agent="tester")
+    )
+
+    assert result.success is False
+    assert result.error == "No agent registered for: tester"
+
+
+def test_execute_task_refuses_unverified_dependencies():
+    agent = Mock()
+    registry = AgentRegistry()
+    registry.register("developer", agent)
+    orchestrator = AgentOrchestrator(registry=registry)
+
+    task = make_execution_task(dependencies=[99])
+
+    with pytest.raises(ValueError, match="Dependency completion"):
+        orchestrator.execute_task(task)
+
+    agent.execute.assert_not_called()

@@ -13,6 +13,8 @@ from api import models
 from api.agents.planner import PlannerAgent
 from api.agents.orchestrator import AgentOrchestrator
 
+from api.agents.execution_service import TaskExecutionService
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -359,6 +361,26 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
+
+
+@app.post("/tasks/{task_id}/execute", response_model=TaskResponse)
+def execute_task(
+    task_id: int,
+    db: Session = Depends(get_db),
+):
+    """Execute an eligible task using its assigned agent."""
+
+    service = TaskExecutionService()
+
+    try:
+        return service.execute_task(db, task_id)
+    except ValueError as exc:
+        message = str(exc)
+
+        if message == f"Task not found: {task_id}":
+            raise HTTPException(status_code=404, detail=message) from exc
+
+        raise HTTPException(status_code=409, detail=message) from exc
 
 
 @app.patch("/tasks/{task_id}/status", response_model=TaskResponse)
