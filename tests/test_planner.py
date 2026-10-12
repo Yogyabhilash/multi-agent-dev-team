@@ -54,7 +54,13 @@ def make_plan_response(project_name, request):
 
     if any(
         word in request.lower()
-        for word in ["login", "authentication", "sign in", "signup", "register"]
+        for word in [
+            "login",
+            "authentication",
+            "sign in",
+            "signup",
+            "register",
+        ]
     ):
         tasks.insert(
             2,
@@ -66,12 +72,21 @@ def make_plan_response(project_name, request):
                 "dependencies": [2],
             },
         )
-        # Testing now depends on the backend and frontend task numbers.
-        tasks[-1]["dependencies"] = [4, 5]
+
+        # Task numbers after insertion:
+        # 3 = authentication, 4 = backend, 5 = frontend, 6 = testing.
+        tasks[-1]["dependencies"] = [3, 4, 5]
 
     if any(
         word in request.lower()
-        for word in ["e-commerce", "ecommerce", "shop", "store", "payment", "cart"]
+        for word in [
+            "e-commerce",
+            "ecommerce",
+            "shop",
+            "store",
+            "payment",
+            "cart",
+        ]
     ):
         tasks.insert(
             -1,
@@ -84,6 +99,11 @@ def make_plan_response(project_name, request):
             },
         )
 
+        # The product/order task is now immediately before testing.
+        # Include it among the testing task's dependencies.
+        product_task_number = len(tasks) - 1
+        tasks[-1]["dependencies"].append(product_task_number)
+
     return json.dumps(
         {
             "project_name": project_name,
@@ -94,6 +114,8 @@ def make_plan_response(project_name, request):
 
 
 class FakeOllamaClient:
+    """Provide predictable model responses without calling Ollama."""
+
     def __init__(self, response=None):
         self.response = response
 
@@ -115,6 +137,9 @@ def test_planner_creates_tasks_for_login_website():
     assert plan.project_name == project_name
     assert len(plan.tasks) == 6
 
+    assert plan.tasks[0].dependencies == []
+    assert plan.tasks[1].dependencies == [1]
+
     titles = [task.title for task in plan.tasks]
     assert "Implement authentication" in titles
     assert "Implement the backend" in titles
@@ -124,7 +149,8 @@ def test_planner_creates_tasks_for_login_website():
         task for task in plan.tasks
         if task.title == "Test the application"
     )
-    assert test_task.dependencies == [4, 5]
+
+    assert test_task.dependencies == [3, 4, 5]
 
 
 def test_planner_rejects_empty_project_name():
@@ -193,14 +219,44 @@ def test_planner_rejects_invalid_dependency():
 
 
 def test_planner_rejects_unsupported_agent():
-    response_data = json.loads(
-        make_plan_response("Demo Website", "Build a website")
+    response = json.dumps(
+        {
+            "project_name": "Demo Website",
+            "summary": "Test plan",
+            "tasks": [
+                {
+                    "title": "Analyze requirements",
+                    "description": "Analyze requirements.",
+                    "assigned_agent": "unknown_agent",
+                    "priority": 1,
+                    "dependencies": [],
+                },
+                {
+                    "title": "Design the architecture",
+                    "description": "Design components.",
+                    "assigned_agent": "architect",
+                    "priority": 2,
+                    "dependencies": [1],
+                },
+                {
+                    "title": "Implement the backend",
+                    "description": "Implement APIs.",
+                    "assigned_agent": "backend",
+                    "priority": 3,
+                    "dependencies": [2],
+                },
+                {
+                    "title": "Build the frontend",
+                    "description": "Build the UI.",
+                    "assigned_agent": "frontend",
+                    "priority": 3,
+                    "dependencies": [2],
+                },
+            ],
+        }
     )
-    response_data["tasks"][0]["assigned_agent"] = "unknown_agent"
 
-    planner = PlannerAgent(
-        FakeOllamaClient(json.dumps(response_data))
-    )
+    planner = PlannerAgent(FakeOllamaClient(response))
 
     with pytest.raises(ValueError, match="unsupported assigned agent"):
         planner.create_plan("Demo Website", "Build a website")
@@ -215,19 +271,21 @@ def test_planner_tasks_have_valid_dependencies():
     )
     plan = planner.create_plan(project_name, request)
 
+    task_numbers = set(range(1, len(plan.tasks) + 1))
+
     for task_number, task in enumerate(plan.tasks, start=1):
         assert task.title.strip()
         assert 1 <= task.priority <= 5
 
         for dependency in task.dependencies:
-            assert 1 <= dependency < task_number
+            assert dependency in task_numbers
+            assert dependency < task_number
 
 
 def test_create_project_plan_api():
     project_name = "Automated Plan Test"
     request = "Build a website with login and a dashboard"
 
-    # Replace only the planner's Ollama client for this API test.
     from api.main import PlannerAgent as MainPlannerAgent
 
     original_init = MainPlannerAgent.__init__
@@ -252,27 +310,41 @@ def test_create_project_plan_api():
 
     assert response.status_code == 201
     data = response.json()
+
     assert data["project"]["name"] == project_name
     assert len(data["tasks"]) == 6
 
     tasks = data["tasks"]
+
+    assert tasks[0]["dependencies"] == []
+    assert tasks[1]["dependencies"] == [tasks[0]["id"]]
+
     test_task = next(
         task for task in tasks
         if task["title"] == "Test the application"
     )
+
+    authentication_task = next(
+        task for task in tasks
+        if task["title"] == "Implement authentication"
+    )
+
     backend_task = next(
         task for task in tasks
         if task["title"] == "Implement the backend"
     )
+
     frontend_task = next(
         task for task in tasks
         if task["title"] == "Build the frontend"
     )
 
     assert set(test_task["dependencies"]) == {
+        authentication_task["id"],
         backend_task["id"],
         frontend_task["id"],
     }
+
     assert all(task["status"] == "pending" for task in tasks)
     assert all(
         task["approval_status"] == "pending"
@@ -288,12 +360,40 @@ def test_create_project_plan_rejects_empty_name():
             "request": "Build a website",
         },
     )
+
     assert response.status_code == 422
+
+
+def test_planner_frontend_and_backend_depend_on_architecture():
+    project_name = "Demo Website"
+    request = "Build a website with login and a dashboard"
+
+    planner = PlannerAgent(
+        FakeOllamaClient(make_plan_response(project_name, request))
+    )
+    plan = planner.create_plan(project_name, request)
+
+    task_numbers = {
+        task.title: number
+        for number, task in enumerate(plan.tasks, start=1)
+    }
+
+    assert (
+        plan.tasks[task_numbers["Implement the backend"] - 1].dependencies
+        == [task_numbers["Design the architecture"]]
+    )
+
+    assert (
+        plan.tasks[task_numbers["Build the frontend"] - 1].dependencies
+        == [task_numbers["Design the architecture"]]
+    )
 
 
 def test_planner_adds_ecommerce_task():
     project_name = "Online Store"
-    request = "Build an e-commerce website with a product catalog and shopping cart"
+    request = (
+        "Build an e-commerce website with a product catalog and shopping cart"
+    )
 
     planner = PlannerAgent(
         FakeOllamaClient(make_plan_response(project_name, request))
@@ -301,9 +401,22 @@ def test_planner_adds_ecommerce_task():
     plan = planner.create_plan(project_name, request)
 
     titles = [task.title for task in plan.tasks]
+
     assert "Implement product and order features" in titles
     assert "Implement the backend" in titles
     assert "Build the frontend" in titles
+
+    test_task = next(
+        task for task in plan.tasks
+        if task.title == "Test the application"
+    )
+    product_task_number = next(
+        number
+        for number, task in enumerate(plan.tasks, start=1)
+        if task.title == "Implement product and order features"
+    )
+
+    assert product_task_number in test_task.dependencies
 
 
 def test_planner_creates_basic_website_plan():
@@ -316,6 +429,7 @@ def test_planner_creates_basic_website_plan():
     plan = planner.create_plan(project_name, request)
 
     titles = [task.title for task in plan.tasks]
+
     assert "Analyze requirements" in titles
     assert "Design the architecture" in titles
     assert "Implement the backend" in titles
