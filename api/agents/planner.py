@@ -1,10 +1,10 @@
-
 import json
 
 from pydantic import BaseModel, Field, ValidationError
 
 from api.agents.ollama_client import OllamaClient
 from api.agents.plan_validator import validate_workflow
+
 
 class PlannedTask(BaseModel):
     """One task produced by the planner."""
@@ -127,9 +127,11 @@ Rules:
                         "earlier tasks."
                     )
 
-                if plan.tasks[0].dependencies:
-                    raise ValueError("The first task must not have dependencies.")
+        if plan.tasks[0].dependencies:
+            raise ValueError("The first task must not have dependencies.")
 
-                validate_workflow(plan)
-
-                return plan
+        # Validate only after every task has passed individual checks.
+        # Returning inside the loop skips later tasks and fails when no
+        # task has dependencies.
+        validate_workflow(plan)
+        return plan
