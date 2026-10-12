@@ -1,5 +1,9 @@
 
-from pydantic import BaseModel, Field
+import json
+
+from pydantic import BaseModel, Field, ValidationError
+
+from api.agents.ollama_client import OllamaClient
 
 
 class PlannedTask(BaseModel):
@@ -21,144 +25,109 @@ class ProjectPlan(BaseModel):
 
 
 class PlannerAgent:
-    """Create a structured plan based on a software request."""
+    """Generate and validate project plans using a local Ollama model."""
+
+    def __init__(self, ollama_client: OllamaClient | None = None):
+        self.ollama_client = ollama_client or OllamaClient()
 
     def create_plan(self, project_name: str, request: str) -> ProjectPlan:
-        if not project_name.strip():
+        project_name = project_name.strip()
+        request = request.strip()
+
+        if not project_name:
             raise ValueError("Project name cannot be empty.")
 
-        if not request.strip():
+        if not request:
             raise ValueError("Project request cannot be empty.")
 
-        request_lower = request.lower()
+        prompt = f"""
+You are a software project planning agent.
 
-        # Step 1: Analyze requirements and design the architecture.
-        tasks = [
-            PlannedTask(
-                title="Analyze requirements",
-                description=(
-                    f"Identify the main requirements: {request.strip()}"
-                ),
-                assigned_agent="planner",
-                priority=1,
-            ),
-            PlannedTask(
-                title="Design the architecture",
-                description=(
-                    "Define the components, data flow, and how they interact."
-                ),
-                assigned_agent="architect",
-                priority=2,
-                dependencies=[1],
-            ),
-        ]
+Create a practical implementation plan for the user's software project.
 
-        # Step 2: Add authentication if requested.
-        if any(
-            word in request_lower
-            for word in [
-                "login",
-                "authentication",
-                "sign in",
-                "signup",
-                "register",
-            ]
-        ):
-            tasks.append(
-                PlannedTask(
-                    title="Implement authentication",
-                    description=(
-                        "Build login, registration, and secure "
-                        "authentication as required."
-                    ),
-                    assigned_agent="backend",
-                    priority=2,
-                    dependencies=[2],
+Project name: {project_name}
+User request: {request}
+
+Return ONLY a valid JSON object. Do not use Markdown fences.
+
+Use exactly this structure:
+{{
+  "project_name": "{project_name}",
+  "summary": "A short summary of the project",
+  "tasks": [
+    {{
+      "title": "Analyze requirements",
+      "description": "Identify the requirements",
+      "assigned_agent": "planner",
+      "priority": 1,
+      "dependencies": []
+    }}
+  ]
+}}
+
+Rules:
+- Include between 4 and 12 tasks.
+- Use only these assigned_agent values:
+  planner, architect, backend, frontend, qa, devops.
+- Priority must be an integer from 1 to 5.
+- Dependencies are 1-based task numbers.
+- A dependency must refer to an earlier task.
+- The first task must have no dependencies.
+- Include architecture, implementation, and testing tasks as appropriate.
+- Do not include tasks unrelated to the user's request.
+"""
+
+        raw_response = self.ollama_client.generate(prompt)
+
+        try:
+            data = json.loads(raw_response)
+            plan = ProjectPlan.model_validate(data)
+        except (json.JSONDecodeError, ValidationError) as exc:
+            raise ValueError(
+                "Ollama returned an invalid project plan. "
+                "Please try again."
+            ) from exc
+
+        if plan.project_name.strip() != project_name:
+            raise ValueError(
+                "Ollama returned a project name that does not match "
+                "the requested project."
+            )
+
+        if not 4 <= len(plan.tasks) <= 12:
+            raise ValueError(
+                "The generated plan must contain between 4 and 12 tasks."
+            )
+
+        allowed_agents = {
+            "planner",
+            "architect",
+            "backend",
+            "frontend",
+            "qa",
+            "devops",
+        }
+
+        for task_number, task in enumerate(plan.tasks, start=1):
+            if task.assigned_agent not in allowed_agents:
+                raise ValueError(
+                    f"Task {task_number} has an unsupported assigned agent."
                 )
-            )
 
-        # Step 3: Add e-commerce features if requested.
-        if any(
-            word in request_lower
-            for word in [
-                "e-commerce",
-                "ecommerce",
-                "shop",
-                "store",
-                "payment",
-                "cart",
-            ]
-        ):
-            tasks.append(
-                PlannedTask(
-                    title="Implement product and order features",
-                    description=(
-                        "Build the relevant product catalog, cart, "
-                        "and order workflows."
-                    ),
-                    assigned_agent="backend",
-                    priority=3,
-                    dependencies=[2],
+            if len(set(task.dependencies)) != len(task.dependencies):
+                raise ValueError(
+                    f"Task {task_number} contains duplicate dependencies."
                 )
-            )
 
-        # Step 4: Add the core backend and frontend tasks.
-        tasks.extend(
-            [
-                PlannedTask(
-                    title="Implement the backend",
-                    description=(
-                        "Implement API endpoints, data handling, "
-                        "and application logic."
-                    ),
-                    assigned_agent="backend",
-                    priority=3,
-                    dependencies=[2],
-                ),
-                PlannedTask(
-                    title="Build the frontend",
-                    description=(
-                        "Build a responsive user interface "
-                        "and connect it to the API."
-                    ),
-                    assigned_agent="frontend",
-                    priority=3,
-                    dependencies=[2],
-                ),
-            ]
-        )
+            for dependency in task.dependencies:
+                if dependency < 1 or dependency >= task_number:
+                    raise ValueError(
+                        f"Task {task_number} has an invalid dependency: "
+                        f"{dependency}. Dependencies must refer to "
+                        "earlier tasks."
+                    )
 
-        # Find task numbers so testing depends on both implementations.
-        backend_number = next(
-            index
-            for index, task in enumerate(tasks, start=1)
-            if task.title == "Implement the backend"
-        )
+        if plan.tasks[0].dependencies:
+            raise ValueError("The first task must not have dependencies.")
 
-        frontend_number = next(
-            index
-            for index, task in enumerate(tasks, start=1)
-            if task.title == "Build the frontend"
-        )
-
-        # Step 5: Test after the backend and frontend tasks.
-        tasks.append(
-            PlannedTask(
-                title="Test the application",
-                description=(
-                    "Test functionality, API behavior, "
-                    "and responsive design."
-                ),
-                assigned_agent="qa",
-                priority=2,
-                dependencies=[backend_number, frontend_number],
-            )
-        )
-
-        return ProjectPlan(
-            project_name=project_name.strip(),
-            summary=(
-                f"Initial implementation plan for: {request.strip()}"
-            ),
-            tasks=tasks,
-        )
+        return plan
