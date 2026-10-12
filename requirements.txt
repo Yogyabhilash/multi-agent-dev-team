@@ -1,5 +1,7 @@
-﻿fastapi==0.143.0
+fastapi==0.143.0
 uvicorn==0.54.0
 sqlalchemy
 psycopg[binary]
 httpx==0.28.1
+alembic>=1.13,<2.0
+python-dotenv>=1.0,<2.0
