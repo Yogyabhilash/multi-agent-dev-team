@@ -61,6 +61,8 @@ class PlannerAgent:
         "authentication integration",
         "integrate login",
         "integrate frontend and backend",
+        "integrate api and database",
+        "integrate backend and database",
     )
 
     TESTING_KEYWORDS = (
@@ -88,11 +90,6 @@ class PlannerAgent:
         "set up staging environment",
         "prepare staging environment",
         "configure staging environment",
-        "integrate api and database",
-        "integrate backend and database",
-        "integrate frontend and backend",
-        "integrate authentication",
-        "authentication integration",
     )
 
     def __init__(self, ollama_client: OllamaClient | None = None):

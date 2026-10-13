@@ -29,6 +29,8 @@ IMPLEMENTATION_KEYWORDS = (
     "authentication integration",
     "integrate login",
     "integrate frontend and backend",
+    "integrate api and database",
+    "integrate backend and database",
 )
 
 TESTING_KEYWORDS = (
