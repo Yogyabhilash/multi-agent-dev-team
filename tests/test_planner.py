@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
-from api.agents.planner import PlannerAgent
+from api.agents.planner import PlannerAgent, PlannedTask, ProjectPlan
 
 
 client = TestClient(app)
@@ -436,3 +436,201 @@ def test_planner_creates_basic_website_plan():
     assert "Build the frontend" in titles
     assert "Test the application" in titles
     assert "Implement authentication" not in titles
+
+
+def test_normalize_dependency_titles_to_task_numbers():
+    data = {
+        "tasks": [
+            {"title": "Analyze requirements", "dependencies": []},
+            {
+                "title": "Develop backend API",
+                "dependencies": ["Analyze requirements"],
+            },
+            {
+                "title": "Write automated tests",
+                "dependencies": ["Develop backend API"],
+            },
+        ]
+    }
+
+    PlannerAgent._normalize_dependency_references(data)
+
+    assert data["tasks"][1]["dependencies"] == [1]
+    assert data["tasks"][2]["dependencies"] == [2]
+
+
+def test_repair_adds_missing_implementation_dependencies():
+    plan = ProjectPlan(
+        project_name="Task Manager API",
+        summary="Test plan",
+        tasks=[
+            PlannedTask(
+                title="Analyze requirements",
+                description="Analyze the requirements.",
+                assigned_agent="planner",
+                priority=1,
+                dependencies=[],
+            ),
+            PlannedTask(
+                title="Implement database connection",
+                description="Connect to PostgreSQL.",
+                assigned_agent="backend",
+                priority=2,
+                dependencies=[1],
+            ),
+            PlannedTask(
+                title="Implement CRUD operations",
+                description="Build CRUD endpoints.",
+                assigned_agent="backend",
+                priority=3,
+                dependencies=[1],
+            ),
+            PlannedTask(
+                title="Write automated tests",
+                description="Test the API.",
+                assigned_agent="qa",
+                priority=4,
+                dependencies=[1],
+            ),
+        ],
+    )
+
+    PlannerAgent._repair_workflow_dependencies(plan)
+
+    assert plan.tasks[3].dependencies == [1, 2, 3]
+
+
+def test_repair_adds_testing_dependency_to_deployment():
+    plan = ProjectPlan(
+        project_name="Task Manager API",
+        summary="Test plan",
+        tasks=[
+            PlannedTask(
+                title="Analyze requirements",
+                description="Analyze requirements.",
+                assigned_agent="planner",
+                priority=1,
+                dependencies=[],
+            ),
+            PlannedTask(
+                title="Write automated tests",
+                description="Test the API.",
+                assigned_agent="qa",
+                priority=2,
+                dependencies=[1],
+            ),
+            PlannedTask(
+                title="Deploy API to staging",
+                description="Deploy to staging.",
+                assigned_agent="devops",
+                priority=3,
+                dependencies=[1],
+            ),
+        ],
+    )
+
+    PlannerAgent._repair_workflow_dependencies(plan)
+
+    assert 2 in plan.tasks[2].dependencies
+
+
+def test_repair_adds_dependencies_to_authentication_integration():
+    plan = ProjectPlan(
+        project_name="Login Website",
+        summary="Login website",
+        tasks=[
+            PlannedTask(
+                title="Analyze requirements",
+                description="Analyze requirements",
+                assigned_agent="planner",
+                priority=1,
+                dependencies=[],
+            ),
+            PlannedTask(
+                title="Implement frontend",
+                description="Build frontend",
+                assigned_agent="frontend",
+                priority=3,
+                dependencies=[1],
+            ),
+            PlannedTask(
+                title="Implement backend API",
+                description="Build backend",
+                assigned_agent="backend",
+                priority=3,
+                dependencies=[1],
+            ),
+            PlannedTask(
+                title="Implement database",
+                description="Build database",
+                assigned_agent="backend",
+                priority=3,
+                dependencies=[1],
+            ),
+            PlannedTask(
+                title="Integrate authentication",
+                description="Integrate frontend and backend",
+                assigned_agent="backend",
+                priority=4,
+                dependencies=[2],
+            ),
+        ],
+    )
+
+    PlannerAgent._repair_workflow_dependencies(plan)
+
+    integration = plan.tasks[4]
+    assert 2 in integration.dependencies
+    assert 3 in integration.dependencies
+    assert 4 in integration.dependencies
+
+
+def test_repair_makes_deployment_depend_on_infrastructure():
+    plan = ProjectPlan(
+        project_name="Login Website",
+        summary="Login website",
+        tasks=[
+            PlannedTask(
+                title="Analyze requirements",
+                description="Analyze requirements",
+                assigned_agent="planner",
+                priority=1,
+                dependencies=[],
+            ),
+            PlannedTask(
+                title="Implement backend API",
+                description="Build backend",
+                assigned_agent="backend",
+                priority=3,
+                dependencies=[1],
+            ),
+            PlannedTask(
+                title="Write automated tests",
+                description="Test the application",
+                assigned_agent="qa",
+                priority=4,
+                dependencies=[2],
+            ),
+            PlannedTask(
+                title="Setup infrastructure",
+                description="Prepare staging infrastructure",
+                assigned_agent="devops",
+                priority=3,
+                dependencies=[1],
+            ),
+            PlannedTask(
+                title="Deploy to staging",
+                description="Deploy the application",
+                assigned_agent="devops",
+                priority=5,
+                dependencies=[3],
+            ),
+        ],
+    )
+
+    PlannerAgent._repair_workflow_dependencies(plan)
+
+    deployment = plan.tasks[4]
+    assert 3 in deployment.dependencies
+    assert 4 in deployment.dependencies
+    assert 2 in deployment.dependencies
