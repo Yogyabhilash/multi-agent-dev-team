@@ -7,8 +7,56 @@ if TYPE_CHECKING:
     from api.agents.planner import ProjectPlan
 
 
+IMPLEMENTATION_KEYWORDS = (
+    "implement backend",
+    "develop backend",
+    "build backend",
+    "implement frontend",
+    "develop frontend",
+    "build frontend",
+    "implement authentication",
+    "implement product",
+    "implement crud",
+    "implement database",
+    "develop database",
+    "implement api",
+    "implement postgres",
+    "develop api",
+    "develop service",
+    "build api",
+    "build service",
+    "integrate authentication",
+    "authentication integration",
+    "integrate login",
+    "integrate frontend and backend",
+)
+
+TESTING_KEYWORDS = (
+    "test",
+    "quality assurance",
+    "qa testing",
+)
+
+DEPLOYMENT_KEYWORDS = (
+    "deploy",
+    "deployment",
+    "publish to production",
+)
+
+INFRASTRUCTURE_KEYWORDS = (
+    "setup infrastructure",
+    "setup deployment infrastructure",
+    "set up infrastructure",
+    "configure infrastructure",
+    "provision infrastructure",
+    "prepare staging infrastructure",
+    "deployment infrastructure",
+    "infrastructure setup",
+)
+
+
 def validate_workflow(plan: ProjectPlan) -> None:
-    """Validate implementation, testing, and deployment order."""
+    """Validate implementation, testing, infrastructure, and deployment order."""
 
     tasks = plan.tasks
 
@@ -17,33 +65,15 @@ def validate_workflow(plan: ProjectPlan) -> None:
         return [
             number
             for number, task in enumerate(tasks, start=1)
-            if any(keyword in task.title.lower() for keyword in keywords)
+            if any(keyword in task.title.casefold() for keyword in keywords)
         ]
 
-    implementation_tasks = find_task_numbers(
-        "implement backend",
-        "develop backend",
-        "build backend",
-        "implement frontend",
-        "develop frontend",
-        "build frontend",
-        "implement authentication",
-        "implement product",
-    )
+    implementation_tasks = find_task_numbers(*IMPLEMENTATION_KEYWORDS)
+    testing_tasks = find_task_numbers(*TESTING_KEYWORDS)
+    deployment_tasks = find_task_numbers(*DEPLOYMENT_KEYWORDS)
+    infrastructure_tasks = find_task_numbers(*INFRASTRUCTURE_KEYWORDS)
 
-    testing_tasks = find_task_numbers(
-        "test",
-        "quality assurance",
-        "qa testing",
-    )
-
-    deployment_tasks = find_task_numbers(
-        "deploy",
-        "deployment",
-        "publish to production",
-    )
-
-    # Testing must depend on preceding implementation tasks.
+    # Every testing task must depend on preceding implementation tasks.
     for test_number in testing_tasks:
         test_task = tasks[test_number - 1]
 
@@ -61,7 +91,28 @@ def validate_workflow(plan: ProjectPlan) -> None:
                 f"{missing_dependencies}"
             )
 
-    # Deployment requires an earlier testing task.
+    # Infrastructure setup must depend on preceding implementation tasks.
+    for infrastructure_number in infrastructure_tasks:
+        infrastructure_task = tasks[infrastructure_number - 1]
+
+        missing_dependencies = [
+            implementation_number
+            for implementation_number in implementation_tasks
+            if implementation_number < infrastructure_number
+            and implementation_number not in infrastructure_task.dependencies
+        ]
+
+        if missing_dependencies:
+            raise ValueError(
+                f"Infrastructure task {infrastructure_number} must depend "
+                f"on preceding implementation tasks. Missing dependencies: "
+                f"{missing_dependencies}"
+            )
+
+        # Infrastructure setup should not be blocked by testing alone.
+        # This validator does not require a testing dependency here.
+
+    # Deployment requires a preceding testing task.
     if deployment_tasks and not testing_tasks:
         raise ValueError(
             "Deployment tasks require a testing task before deployment."
@@ -80,4 +131,34 @@ def validate_workflow(plan: ProjectPlan) -> None:
             raise ValueError(
                 f"Deployment task {deployment_number} must depend "
                 "on a preceding testing task."
+            )
+
+        # Deployment must depend on preceding implementation tasks.
+        missing_implementations = [
+            implementation_number
+            for implementation_number in implementation_tasks
+            if implementation_number < deployment_number
+            and implementation_number not in deployment_task.dependencies
+        ]
+
+        if missing_implementations:
+            raise ValueError(
+                f"Deployment task {deployment_number} must depend on "
+                f"preceding implementation tasks. Missing dependencies: "
+                f"{missing_implementations}"
+            )
+
+        # Deployment must depend on preceding infrastructure setup tasks.
+        missing_infrastructure = [
+            infrastructure_number
+            for infrastructure_number in infrastructure_tasks
+            if infrastructure_number < deployment_number
+            and infrastructure_number not in deployment_task.dependencies
+        ]
+
+        if missing_infrastructure:
+            raise ValueError(
+                f"Deployment task {deployment_number} must depend on "
+                f"preceding infrastructure tasks. Missing dependencies: "
+                f"{missing_infrastructure}"
             )
