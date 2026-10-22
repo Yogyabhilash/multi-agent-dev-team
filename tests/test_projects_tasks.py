@@ -240,3 +240,36 @@ def test_list_ready_tasks_for_missing_project():
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Project not found"
+
+def test_task_cannot_be_completed_before_dependencies_complete():
+    project_response = client.post(
+        "/projects",
+        json={"name": "Completion Dependency Test"},
+    )
+    assert project_response.status_code == 201
+    project_id = project_response.json()["id"]
+
+    dependency_response = client.post(
+        f"/projects/{project_id}/tasks",
+        json={"title": "Backend task"},
+    )
+    assert dependency_response.status_code == 201
+    dependency_id = dependency_response.json()["id"]
+
+    task_response = client.post(
+        f"/projects/{project_id}/tasks",
+        json={
+            "title": "Frontend task",
+            "dependencies": [dependency_id],
+        },
+    )
+    assert task_response.status_code == 201
+    task_id = task_response.json()["id"]
+
+    response = client.patch(
+        f"/tasks/{task_id}/status",
+        json={"status": "completed"},
+    )
+
+    assert response.status_code == 409
+    assert "Complete all task dependencies" in response.json()["detail"]

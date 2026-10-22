@@ -411,7 +411,7 @@ def update_task_status(
         )
 
     # A task can run only after all its dependencies are completed.
-    if update.status == "running" and task.dependencies:
+    if update.status in {"running", "completed"} and task.dependencies:
         dependency_tasks = list(
             db.scalars(
                 select(models.Task).where(
